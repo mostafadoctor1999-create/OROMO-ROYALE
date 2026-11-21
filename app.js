@@ -4,8 +4,8 @@
    - SUPABASE_ANON_KEY: المفتاح العام (anon public key).
    اترك القيمتين كما هما ليعمل النظام محلياً على نفس الجهاز كوضع احتياطي تلقائي.
    ======================================================================== */
-const SUPABASE_URL = "YOUR_SUPABASE_URL";
-const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
+const SUPABASE_URL = "https://ozxcfqadiqfhusydmbvd.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_WtGvgzO472Za5jjf_qXisg__cSctLkG";
 const CAFE_WA = "201022622210";
 const STAFF_PIN = "1234";
 const MAPS_URL = "https://goo.gl";   // استبدله برابط تقييم الكافيه على خرائط جوجل
