@@ -1,14 +1,11 @@
 /* ========================================================================
-   إعدادات Firebase: ضع بيانات مشروعك هنا (من Firebase Console > Project settings > Your apps > Web app).
-   اترك الحقول فارغة ليعمل النظام محلياً (على نفس الجهاز فقط) كوضع احتياطي تلقائي.
+   إعدادات Supabase: ضع بيانات مشروعك هنا (من Supabase > Project Settings > API).
+   - SUPABASE_URL: رابط المشروع (Project URL).
+   - SUPABASE_ANON_KEY: المفتاح العام (anon public key).
+   اترك القيمتين كما هما ليعمل النظام محلياً على نفس الجهاز كوضع احتياطي تلقائي.
    ======================================================================== */
-const firebaseConfig = {
-  apiKey: "",
-  authDomain: "",
-  databaseURL: "",   // مثال: https://your-project-default-rtdb.firebaseio.com
-  projectId: "",
-  appId: ""
-};
+const SUPABASE_URL = "YOUR_SUPABASE_URL";
+const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
 const CAFE_WA = "201022622210";
 const STAFF_PIN = "1234";
 const MAPS_URL = "https://goo.gl";   // استبدله برابط تقييم الكافيه على خرائط جوجل
@@ -20,28 +17,55 @@ const toast = t => { const e = $("#toast"); e.textContent = t; e.classList.add("
 const waLink = (n, t) => "https://wa.me/" + n + "?text=" + encodeURIComponent(t);
 const normPhone = p => { let d = String(p).replace(/\D/g, ""); if (d.startsWith("00")) d = d.slice(2); if (d.startsWith("0")) d = "20" + d.slice(1); return d; };
 
-/* ---------- طبقة البيانات (سحابية أو محلية) ---------- */
-let useFB = !!(firebaseConfig.apiKey && firebaseConfig.databaseURL), fbRef = null, fbOrders = null, cache = {}, orders = {}, loaded = false, ordersLoaded = false;
+/* ---------- طبقة البيانات (Supabase لحظي أو محلي احتياطي) ---------- */
+let useSB = !!(SUPABASE_URL && SUPABASE_ANON_KEY && !SUPABASE_URL.startsWith("YOUR_") && !SUPABASE_ANON_KEY.startsWith("YOUR_")), sb = null;
+let cache = {}, orders = {}, loaded = false, ordersLoaded = false;
 const subs = [], bc = "BroadcastChannel" in window ? new BroadcastChannel("oromo") : null;
 const emit = () => subs.forEach(f => f());
 const loadLocal = () => { try { cache = JSON.parse(localStorage.getItem("oromo_db") || "{}"); } catch (e) { cache = {}; } try { orders = JSON.parse(localStorage.getItem("oromo_orders") || "{}"); } catch (e) { orders = {}; } };
+const persist = () => { localStorage.setItem("oromo_db", JSON.stringify(cache)); localStorage.setItem("oromo_orders", JSON.stringify(orders)); bc && bc.postMessage(1); };
+const cRow = m => ({ id: m.id, name: m.name, phone: m.phone, stamps: m.stamps || 0, total: m.total || 0, gifts: m.gifts || 0, rating: m.rating || 0, status: m.status || "idle", created: m.created || Date.now() });
+const cObj = r => ({ id: r.id, name: r.name, phone: r.phone, stamps: r.stamps || 0, total: r.total || 0, gifts: r.gifts || 0, rating: r.rating || 0, status: r.status || "idle", created: Number(r.created) });
+const oRow = o => ({ id: o.id, num: o.num, member_id: o.memberId, name: o.name, phone: o.phone, table_no: String(o.table), items: o.items, total: o.total, status: o.status, t: o.t, closed: !!o.closed });
+const oObj = r => ({ id: r.id, num: r.num, memberId: r.member_id, name: r.name, phone: r.phone, table: r.table_no, items: r.items || [], total: r.total || 0, status: r.status, t: Number(r.t), closed: !!r.closed });
+const sbErr = r => { if (r && r.error) { console.warn(r.error); toast("تعذر الاتصال بقاعدة البيانات"); } };
 const DB = {
-  saveOrder(o) { orders[o.id] = o; emit(); if (useFB) fbOrders.child(o.id).set(o); else { localStorage.setItem("oromo_orders", JSON.stringify(orders)); bc && bc.postMessage(1); } },
-  save(m) { cache[m.id] = m; emit(); if (useFB) fbRef.child(m.id).set(m); else { localStorage.setItem("oromo_db", JSON.stringify(cache)); bc && bc.postMessage(1); } }
+  saveOrder(o) { orders[o.id] = o; emit(); if (useSB) sb.from("orders").upsert(oRow(o)).then(sbErr); else persist(); },
+  save(m) { cache[m.id] = m; emit(); if (useSB) sb.from("customers").upsert(cRow(m)).then(sbErr); else persist(); },
+  closeShift() {
+    Object.values(orders).forEach(o => { if (o.status === "done") delete orders[o.id]; });
+    emit();
+    if (useSB) sb.from("orders").update({ closed: true }).eq("status", "done").eq("closed", false).then(sbErr); else persist();
+  }
 };
 const loadScript = src => new Promise((ok, no) => { const s = document.createElement("script"); s.src = src; s.onload = ok; s.onerror = no; document.head.appendChild(s); });
 async function initDB() {
-  if (useFB) {
+  if (useSB) {
     try {
-      await loadScript("https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js");
-      await loadScript("https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js");
-      firebase.initializeApp(firebaseConfig);
-      fbRef = firebase.database().ref("members");
-      fbRef.on("value", s => { cache = s.val() || {}; loaded = true; emit(); });
-      fbOrders = firebase.database().ref("orders");
-      fbOrders.on("value", s => { orders = s.val() || {}; ordersLoaded = true; emit(); });
+      await loadScript("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js");
+      sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      const pull = async () => {
+        const [c, o] = await Promise.all([sb.from("customers").select("*"), sb.from("orders").select("*").eq("closed", false)]);
+        if (c.error || o.error) throw (c.error || o.error);
+        cache = {}; c.data.forEach(r => { cache[r.id] = cObj(r); });
+        orders = {}; o.data.forEach(r => { orders[r.id] = oObj(r); });
+        loaded = true; ordersLoaded = true; emit();
+      };
+      await pull();
+      sb.channel("oromo-live")
+        .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, p => {
+          if (p.eventType === "DELETE") delete orders[p.old.id];
+          else if (p.new.closed) delete orders[p.new.id];
+          else orders[p.new.id] = oObj(p.new);
+          emit();
+        })
+        .on("postgres_changes", { event: "*", schema: "public", table: "customers" }, p => {
+          if (p.eventType === "DELETE") delete cache[p.old.id]; else cache[p.new.id] = cObj(p.new);
+          emit();
+        })
+        .subscribe(s => { if (s === "SUBSCRIBED") pull().catch(() => {}); });
       return;
-    } catch (e) { console.warn("fallback to local", e); useFB = false; }
+    } catch (e) { console.warn("fallback to local", e); useSB = false; }
   }
   loadLocal(); loaded = true; ordersLoaded = true;
   addEventListener("storage", e => { if (e.key === "oromo_db" || e.key === "oromo_orders") { loadLocal(); emit(); } });
@@ -157,6 +181,7 @@ let sel = null, q = "";
 const findMember = t => { t = t.trim().toUpperCase(); if (!t) return null; const n = normPhone(t); return Object.values(cache).find(m => m.id === t || m.id === "ORM-" + t || (n.length >= 6 && normPhone(m.phone).endsWith(n.slice(-9)))) || null; };
 function upd(patch) { if (!sel || !cache[sel]) return; DB.save({ ...cache[sel], ...patch }); }
 function renderStaff() {
+  renderInventory();
   const all = Object.values(cache).sort((a, b) => (b.created || 0) - (a.created || 0));
   $("#stats").innerHTML = [["العملاء", all.length], ["أختام ممنوحة", all.reduce((s, m) => s + (m.total || 0), 0)], ["طلبات جاهزة", all.filter(m => m.status === "ready").length], ["هدايا مسلّمة", all.reduce((s, m) => s + (m.gifts || 0), 0)]].map(s => `<div class="stat"><b>${s[1]}</b><span>${s[0]}</span></div>`).join("");
   const box = $("#selBox"), m = sel && cache[sel];
@@ -233,7 +258,7 @@ function sendOrder() {
   const items = MENU.map((m, i) => ({ n: m[1], q: cart[i] || 0, p: m[2] })).filter(x => x.q > 0);
   if (!items.length) return;
   const num = Object.values(orders).reduce((a, o) => Math.max(a, o.num || 100), 100) + 1;
-  const o = { id: "O" + Date.now().toString(36) + Math.floor(Math.random() * 99), num, memberId: me.id, name: me.name, phone: me.phone, table: $("#tableSel").value, items, total: cartTotals().t, status: "new", t: Date.now() };
+  const o = { id: "O" + Date.now().toString(36) + Math.floor(Math.random() * 99), num, memberId: me.id, name: me.name, phone: me.phone, table: $("#tableSel").value, items, total: cartTotals().t, status: "new", t: Date.now(), closed: false };
   DB.saveOrder(o);
   Object.keys(cart).forEach(k => delete cart[k]); renderCart();
   toast("تم إرسال طلبك بنجاح ✓"); $("#trackWrap").scrollIntoView({ behavior: "smooth" });
@@ -285,15 +310,45 @@ function buildOrders() {
   $("#kBoard").onclick = act; $("#sBoard").onclick = act;
   document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
     document.querySelectorAll(".tab").forEach(x => x.classList.toggle("on", x === t));
-    $("#tabOrders").hidden = t.dataset.tab !== "Orders"; $("#tabMembers").hidden = t.dataset.tab !== "Members";
+    ["Orders", "Members", "Stock"].forEach(k => { $("#tab" + k).hidden = t.dataset.tab !== k; });
   });
   setInterval(() => { if (!$("#kitchen").hidden || !$("#staff").hidden) renderBoards(); }, 30000);
 }
 
+/* ---------- الجرد والمبيعات اليومية ---------- */
+const UNIT = { "قهوة / إسبريسو": "كوب", "سبانش لاتيه": "كوب", "آيس سبانش لاتيه": "كوب", "شوكليت فرابيه": "كوب" };
+function invData() {
+  const list = Object.values(orders).filter(o => o.status === "done" && !o.closed);
+  const map = {}; MENU.forEach(m => { map[m[1]] = { n: m[1], q: 0, r: 0 }; });
+  list.forEach(o => (o.items || []).forEach(x => { const e = map[x.n] || (map[x.n] = { n: x.n, q: 0, r: 0 }); e.q += x.q; e.r += x.q * x.p; }));
+  const rows = Object.values(map).sort((a, b) => b.q - a.q || b.r - a.r);
+  return { list, rows, total: list.reduce((s, o) => s + (o.total || 0), 0), top: rows[0] && rows[0].q > 0 ? rows[0] : null, active: Object.values(orders).filter(o => o.status !== "done").length };
+}
+function renderInventory() {
+  const d = invData();
+  $("#invStats").innerHTML = [["إجمالي مبيعات اليوم", d.total + " ج"], ["الطلبات المكتملة", d.list.length], ["الصنف الأكثر مبيعاً", d.top ? esc(d.top.n) + " (" + d.top.q + ")" : "—"], ["طلبات قيد التنفيذ", d.active]].map(s => `<div class="stat"><b>${s[1]}</b><span>${s[0]}</span></div>`).join("");
+  $("#invRows").innerHTML = d.rows.map(r => `<tr><td>${esc(r.n)}</td><td>${r.q} ${UNIT[r.n] || "قطعة"}</td><td>${r.r} ج</td></tr>`).join("");
+  $("#invFoot").innerHTML = `<tr><td>الإجمالي</td><td>${d.rows.reduce((s, r) => s + r.q, 0)}</td><td>${d.total} ج</td></tr>`;
+}
+function downloadCsv(name, rows) {
+  const csv = "\ufeff" + rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(",")).join("\r\n");
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" })); a.download = name; a.click();
+}
+function invCsv() {
+  const d = invData(), day = new Date().toISOString().slice(0, 10);
+  downloadCsv("oromo-inventory-" + day + ".csv", [["الصنف", "الكمية المباعة", "الإيراد (ج)"]].concat(d.rows.map(r => [r.n, r.q, r.r])).concat([["الإجمالي", d.rows.reduce((s, r) => s + r.q, 0), d.total], ["عدد الطلبات المكتملة", d.list.length, ""]]));
+}
+function closeShiftNow() {
+  if (!confirm("سيتم حفظ نسخة CSV من جرد اليوم تلقائياً ثم تصفير الجرد وبدء يوم جديد. هل تريد المتابعة؟")) return;
+  const d = invData(); invCsv(); DB.closeShift(); toast("تم تقفيل الوردية — إجمالي " + d.total + " ج");
+}
+$("#invCsv").onclick = invCsv;
+$("#closeShift").onclick = () => { pinTarget = "shift"; $("#pinModal").hidden = false; $("#pinIn").value = ""; $("#pinErr").textContent = ""; setTimeout(() => $("#pinIn").focus(), 50); };
+
 /* ---------- التشغيل ---------- */
 $("#lockBtn").onclick = () => { pinTarget = "staff"; $("#pinModal").hidden = false; $("#pinIn").value = ""; $("#pinErr").textContent = ""; setTimeout(() => $("#pinIn").focus(), 50); };
-$("#pinCancel").onclick = () => { $("#pinModal").hidden = true; if (pinTarget === "kitchen") { $("#client").hidden = false; pinTarget = "staff"; if (!me) $("#regModal").hidden = false; } };
-$("#pinForm").onsubmit = e => { e.preventDefault(); if ($("#pinIn").value === STAFF_PIN) { unlockAudio(); $("#pinModal").hidden = true; if (pinTarget === "kitchen") { kFrom = "client"; enterKitchen(); } else enterStaff(); } else $("#pinErr").textContent = "الرقم السري غير صحيح"; };
+$("#pinCancel").onclick = () => { $("#pinModal").hidden = true; if (pinTarget === "kitchen") { $("#client").hidden = false; pinTarget = "staff"; if (!me) $("#regModal").hidden = false; } else pinTarget = "staff"; };
+$("#pinForm").onsubmit = e => { e.preventDefault(); if ($("#pinIn").value === STAFF_PIN) { unlockAudio(); $("#pinModal").hidden = true; if (pinTarget === "kitchen") { kFrom = "client"; enterKitchen(); } else if (pinTarget === "shift") { pinTarget = "staff"; closeShiftNow(); } else enterStaff(); } else $("#pinErr").textContent = "الرقم السري غير صحيح"; };
 $("#exitStaff").onclick = exitStaff;
 $("#exitKitchen").onclick = exitKitchen;
 $("#openKitchen").onclick = () => { kFrom = "staff"; enterKitchen(); };
