@@ -21,11 +21,12 @@ const waLink = (n, t) => "https://wa.me/" + n + "?text=" + encodeURIComponent(t)
 const normPhone = p => { let d = String(p).replace(/\D/g, ""); if (d.startsWith("00")) d = d.slice(2); if (d.startsWith("0")) d = "20" + d.slice(1); return d; };
 
 /* ---------- طبقة البيانات (سحابية أو محلية) ---------- */
-let useFB = !!(firebaseConfig.apiKey && firebaseConfig.databaseURL), fbRef = null, cache = {}, loaded = false;
+let useFB = !!(firebaseConfig.apiKey && firebaseConfig.databaseURL), fbRef = null, fbOrders = null, cache = {}, orders = {}, loaded = false, ordersLoaded = false;
 const subs = [], bc = "BroadcastChannel" in window ? new BroadcastChannel("oromo") : null;
 const emit = () => subs.forEach(f => f());
-const loadLocal = () => { try { cache = JSON.parse(localStorage.getItem("oromo_db") || "{}"); } catch (e) { cache = {}; } };
+const loadLocal = () => { try { cache = JSON.parse(localStorage.getItem("oromo_db") || "{}"); } catch (e) { cache = {}; } try { orders = JSON.parse(localStorage.getItem("oromo_orders") || "{}"); } catch (e) { orders = {}; } };
 const DB = {
+  saveOrder(o) { orders[o.id] = o; emit(); if (useFB) fbOrders.child(o.id).set(o); else { localStorage.setItem("oromo_orders", JSON.stringify(orders)); bc && bc.postMessage(1); } },
   save(m) { cache[m.id] = m; emit(); if (useFB) fbRef.child(m.id).set(m); else { localStorage.setItem("oromo_db", JSON.stringify(cache)); bc && bc.postMessage(1); } }
 };
 const loadScript = src => new Promise((ok, no) => { const s = document.createElement("script"); s.src = src; s.onload = ok; s.onerror = no; document.head.appendChild(s); });
@@ -37,11 +38,13 @@ async function initDB() {
       firebase.initializeApp(firebaseConfig);
       fbRef = firebase.database().ref("members");
       fbRef.on("value", s => { cache = s.val() || {}; loaded = true; emit(); });
+      fbOrders = firebase.database().ref("orders");
+      fbOrders.on("value", s => { orders = s.val() || {}; ordersLoaded = true; emit(); });
       return;
     } catch (e) { console.warn("fallback to local", e); useFB = false; }
   }
-  loadLocal(); loaded = true;
-  addEventListener("storage", e => { if (e.key === "oromo_db") { loadLocal(); emit(); } });
+  loadLocal(); loaded = true; ordersLoaded = true;
+  addEventListener("storage", e => { if (e.key === "oromo_db" || e.key === "oromo_orders") { loadLocal(); emit(); } });
   if (bc) bc.onmessage = () => { loadLocal(); emit(); };
 }
 
@@ -66,14 +69,15 @@ function confetti() {
 }
 
 /* ---------- شاشة العميل ---------- */
-let me = null, prev = null, alarmTimer = null, qrFor = null;
+let me = null, prev = null, alarmTimer = null, qrFor = null, lastAlarm = 0;
 try { me = JSON.parse(localStorage.getItem("oromo_me") || "null"); } catch (e) {}
 
 function stopAlarm() { clearInterval(alarmTimer); alarmTimer = null; navigator.vibrate && navigator.vibrate(0); }
 function alarm() {
+  if (Date.now() - lastAlarm < 6000) return; lastAlarm = Date.now();
   const buzz = () => { navigator.vibrate && navigator.vibrate([500, 200, 500, 200, 900]); chime(); };
   buzz(); let n = 0; clearInterval(alarmTimer); alarmTimer = setInterval(() => { if (++n > 8) stopAlarm(); else buzz(); }, 3500);
-  const body = "قهوتك جاهزة في أورومو ☕ تفضل بالاستلام";
+  const body = "طلبك جاهز الآن في أورومو ☕ تفضل بالاستلام";
   if ("Notification" in window && Notification.permission === "granted") {
     const opts = { body, icon: "./icon.svg", badge: "./icon.svg", vibrate: [500, 200, 500], tag: "oromo-ready", renotify: true, dir: "rtl", lang: "ar" };
     if (navigator.serviceWorker) navigator.serviceWorker.ready.then(r => r.showNotification("OROMO Café", opts)).catch(() => new Notification("OROMO Café", opts));
@@ -94,12 +98,15 @@ function renderClient() {
   pg.className = "pager glass " + st;
   $("#pTitle").textContent = st === "ready" ? "قهوتك جاهزة ☕" : st === "preparing" ? "جاري تحضير قهوتك" : "لا يوجد طلب نشط";
   $("#pSub").textContent = st === "ready" ? "تفضل بالاستلام من الكاونتر." : st === "preparing" ? "سنخبرك فور جاهزيتها، استرخِ." : "عند جاهزية قهوتك سيهتز هاتفك وتصلك نغمة هادئة.";
+  const mine = myOrders(); renderTracker(mine);
+  const nowReady = mine.filter(o => o.status === "ready").map(o => o.id);
   if (prev) {
-    if (prev.st !== "ready" && st === "ready") alarm();
-    if (st !== "ready") stopAlarm();
+    const newReady = nowReady.some(id => !prev.r.includes(id));
+    if ((prev.st !== "ready" && st === "ready") || newReady) alarm();
+    if (st !== "ready" && !nowReady.length) stopAlarm();
     if ((prev.s || 0) < GOAL && s >= GOAL) { confetti(); navigator.vibrate && navigator.vibrate([100, 60, 100]); }
   }
-  prev = { st, s };
+  prev = { st, s, r: nowReady };
   document.querySelectorAll("#stars button").forEach((b, i) => b.classList.toggle("on", i < (m.rating || 0)));
 }
 function waMsg(item) { return `مرحباً أورومو ☕\nالاسم: ${me ? me.name : "-"}\nرقم العضوية: ${me ? me.id : "-"}\nالطلب: ${item}`; }
@@ -193,23 +200,113 @@ function buildStaff() {
     } catch (e) { toast("تعذر فتح الكاميرا، تأكد من الصلاحيات"); }
   };
 }
-function enterStaff() { $("#client").hidden = true; $("#staff").hidden = false; document.title = "OROMO · الكاشير"; renderStaff(); }
+function enterStaff() { $("#client").hidden = true; $("#kitchen").hidden = true; $("#staff").hidden = false; document.title = "OROMO · الكاشير"; renderStaff(); renderBoards(); }
+let pinTarget = "staff", kFrom = "client";
+function enterKitchen() { $("#client").hidden = true; $("#staff").hidden = true; $("#kitchen").hidden = false; document.title = "OROMO · المطبخ"; renderBoards(); }
+function exitKitchen() { $("#kitchen").hidden = true; document.title = "OROMO Café"; if (kFrom === "staff") enterStaff(); else { $("#client").hidden = false; if (!me) $("#regModal").hidden = false; } kFrom = "client"; }
 function exitStaff() { $("#staff").hidden = true; $("#client").hidden = false; document.title = "OROMO Café"; }
 
+/* ---------- السلة وتتبع الطلب (العميل) ---------- */
+const MENU = [["☕", "قهوة / إسبريسو", 45], ["🥛", "سبانش لاتيه", 75], ["🧊", "آيس سبانش لاتيه", 85], ["🍫", "شوكليت فرابيه", 95], ["🥟", "باتيه طازج", 55], ["🥐", "كرواسون سوبريم", 75], ["🥨", "بريتزل أورومو", 60], ["🥞", "بان كيك ميكس شوكولاتة", 95]];
+const cart = {};
+const tableLabel = t => t === "counter" ? "استلام من الكاونتر" : "ترابيزة " + t;
+const STEPS = [["new", "تم الاستلام"], ["preparing", "جاري التحضير 🔥"], ["ready", "جاهز ☕"]];
+const myOrders = () => me ? Object.values(orders).filter(o => o.memberId === me.id && o.status !== "done").sort((a, b) => b.t - a.t) : [];
+function cartTotals() { let c = 0, t = 0; MENU.forEach((m, i) => { const q = cart[i] || 0; c += q; t += q * m[2]; }); return { c, t }; }
+function renderCart() {
+  MENU.forEach((m, i) => { $("#q" + i).textContent = cart[i] || 0; });
+  const { c, t } = cartTotals();
+  $("#cCount").textContent = c + (c === 1 ? " صنف" : " أصناف"); $("#cTotal").textContent = t + " ج";
+  $("#cartBar").hidden = c === 0;
+}
+function buildMenu() {
+  $("#menu").innerHTML = MENU.map((m, i) => `<div class="mitem"><span class="em">${m[0]}</span><div class="mi"><b>${m[1]}</b><span>${m[2]} ج</span></div><div class="qty"><button data-i="${i}" data-d="-1" aria-label="إنقاص">−</button><output id="q${i}">0</output><button data-i="${i}" data-d="1" aria-label="زيادة">+</button></div></div>`).join("");
+  $("#menu").onclick = e => {
+    const b = e.target.closest("button[data-i]"); if (!b) return;
+    const i = b.dataset.i; cart[i] = Math.max(0, Math.min(20, (cart[i] || 0) + Number(b.dataset.d))); renderCart();
+  };
+  $("#tableSel").innerHTML = `<option value="counter">استلام من الكاونتر</option>` + Array.from({ length: 30 }, (_, k) => `<option value="${k + 1}">ترابيزة ${k + 1}</option>`).join("");
+  $("#sendOrder").onclick = sendOrder; renderCart();
+}
+function sendOrder() {
+  if (!me) return;
+  const items = MENU.map((m, i) => ({ n: m[1], q: cart[i] || 0, p: m[2] })).filter(x => x.q > 0);
+  if (!items.length) return;
+  const num = Object.values(orders).reduce((a, o) => Math.max(a, o.num || 100), 100) + 1;
+  const o = { id: "O" + Date.now().toString(36) + Math.floor(Math.random() * 99), num, memberId: me.id, name: me.name, phone: me.phone, table: $("#tableSel").value, items, total: cartTotals().t, status: "new", t: Date.now() };
+  DB.saveOrder(o);
+  Object.keys(cart).forEach(k => delete cart[k]); renderCart();
+  toast("تم إرسال طلبك بنجاح ✓"); $("#trackWrap").scrollIntoView({ behavior: "smooth" });
+}
+function renderTracker(list) {
+  $("#tracker").innerHTML = list.map(o => {
+    const k = STEPS.findIndex(s => s[0] === o.status);
+    const msg = o.status === "new" ? "تم إرسال طلبك بنجاح — الوقت المتوقع للتحضير 10 إلى 15 دقيقة ⏳" : o.status === "preparing" ? "فريقنا يجهّز طلبك الآن 🔥" : "طلبك جاهز الآن في أورومو ☕ تفضل بالاستلام";
+    return `<div class="glass trk ${o.status}"><div class="trow"><b>طلب #${o.num}</b><span>${esc(tableLabel(o.table))}</span></div><p class="tmsg">${msg}</p>${o.status !== "ready" ? `<div class="cd" data-t="${o.t}">15:00</div>` : ""}<div class="steps">${STEPS.map((s, i) => `<i class="${i <= k ? "on" : ""}">${s[1]}</i>`).join("")}</div><small>${o.items.map(x => esc(x.n) + " × " + x.q).join("، ")} · ${o.total} ج</small></div>`;
+  }).join("");
+  tick();
+}
+function tick() {
+  document.querySelectorAll(".cd").forEach(e => {
+    const r = Math.max(0, 900 - Math.floor((Date.now() - Number(e.dataset.t)) / 1000));
+    e.textContent = String(Math.floor(r / 60)).padStart(2, "0") + ":" + String(r % 60).padStart(2, "0");
+  });
+}
+setInterval(tick, 1000);
+
+/* ---------- شاشة المطبخ والبار (KDS) ---------- */
+const seen = new Set(); let boardInit = false;
+const ago = t => { const m = Math.floor((Date.now() - t) / 60000); return m < 1 ? "الآن" : "منذ " + m + " د"; };
+function setOrderStatus(o, status) {
+  if (!o) return;
+  DB.saveOrder({ ...o, status });
+  const m = cache[o.memberId]; if (!m) return;
+  const act = Object.values(orders).filter(x => x.memberId === o.memberId && x.status !== "done");
+  const ms = act.some(x => x.status === "ready") ? "ready" : act.some(x => x.status === "preparing") ? "preparing" : "idle";
+  DB.save({ ...m, status: ms });
+}
+function boardHTML() {
+  const list = Object.values(orders).filter(o => o.status !== "done").sort((a, b) => a.t - b.t);
+  if (!list.length) return `<p class="empty">لا توجد طلبات حالياً ☕ الطلبات الجديدة تظهر هنا فوراً.</p>`;
+  const lbl = { new: "جديد", preparing: "جاري التحضير 🔥", ready: "جاهز ☕" };
+  return list.map(o => `<article class="kcard ${o.status}"><header><b class="onum">#${o.num}</b><span class="badge">${lbl[o.status]}</span></header><div class="kmeta"><b>${esc(o.name)}</b><span>${esc(tableLabel(o.table))}</span><span>${new Date(o.t).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" })} · ${ago(o.t)}</span></div><ul>${o.items.map(x => `<li><b>${x.q}×</b> ${esc(x.n)}</li>`).join("")}</ul><div class="kacts">${o.status === "ready" ? `<button class="btn ghost" data-o="${esc(o.id)}" data-a="done">تم التسليم ✓</button>` : `<button class="btn prep" data-o="${esc(o.id)}" data-a="preparing" ${o.status === "preparing" ? "disabled" : ""}>جاري التحضير 🔥</button><button class="btn emerald" data-o="${esc(o.id)}" data-a="ready">تم التحضير ☕</button>`}</div></article>`).join("");
+}
+function renderBoards() {
+  if (!ordersLoaded) return;
+  const list = Object.values(orders), active = list.filter(o => o.status !== "done").length;
+  const fresh = list.some(o => !seen.has(o.id) && o.status === "new");
+  if (boardInit && fresh && (!$("#kitchen").hidden || !$("#staff").hidden)) chime();
+  list.forEach(o => seen.add(o.id)); boardInit = true;
+  $("#kBoard").innerHTML = boardHTML(); $("#sBoard").innerHTML = boardHTML();
+  $("#ordTab").textContent = "الطلبات الواردة" + (active ? " (" + active + ")" : "");
+}
+function buildOrders() {
+  const act = e => { const b = e.target.closest("button[data-o]"); if (b && !b.disabled) setOrderStatus(orders[b.dataset.o], b.dataset.a); };
+  $("#kBoard").onclick = act; $("#sBoard").onclick = act;
+  document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
+    document.querySelectorAll(".tab").forEach(x => x.classList.toggle("on", x === t));
+    $("#tabOrders").hidden = t.dataset.tab !== "Orders"; $("#tabMembers").hidden = t.dataset.tab !== "Members";
+  });
+  setInterval(() => { if (!$("#kitchen").hidden || !$("#staff").hidden) renderBoards(); }, 30000);
+}
+
 /* ---------- التشغيل ---------- */
-$("#lockBtn").onclick = () => { $("#pinModal").hidden = false; $("#pinIn").value = ""; $("#pinErr").textContent = ""; setTimeout(() => $("#pinIn").focus(), 50); };
-$("#pinCancel").onclick = () => $("#pinModal").hidden = true;
-$("#pinForm").onsubmit = e => { e.preventDefault(); if ($("#pinIn").value === STAFF_PIN) { $("#pinModal").hidden = true; enterStaff(); } else $("#pinErr").textContent = "الرقم السري غير صحيح"; };
+$("#lockBtn").onclick = () => { pinTarget = "staff"; $("#pinModal").hidden = false; $("#pinIn").value = ""; $("#pinErr").textContent = ""; setTimeout(() => $("#pinIn").focus(), 50); };
+$("#pinCancel").onclick = () => { $("#pinModal").hidden = true; if (pinTarget === "kitchen") { $("#client").hidden = false; pinTarget = "staff"; if (!me) $("#regModal").hidden = false; } };
+$("#pinForm").onsubmit = e => { e.preventDefault(); if ($("#pinIn").value === STAFF_PIN) { unlockAudio(); $("#pinModal").hidden = true; if (pinTarget === "kitchen") { kFrom = "client"; enterKitchen(); } else enterStaff(); } else $("#pinErr").textContent = "الرقم السري غير صحيح"; };
 $("#exitStaff").onclick = exitStaff;
+$("#exitKitchen").onclick = exitKitchen;
+$("#openKitchen").onclick = () => { kFrom = "staff"; enterKitchen(); };
 
 (async function boot() {
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => {});
-  buildClient(); buildStaff();
-  const staffMode = new URLSearchParams(location.search).get("view") === "staff";
-  subs.push(() => { if (!$("#staff").hidden) renderStaff(); renderClient(); });
+  buildClient(); buildMenu(); buildStaff(); buildOrders();
+  const view = new URLSearchParams(location.search).get("view");
+  if (view === "kitchen") { pinTarget = "kitchen"; $("#client").hidden = true; $("#pinModal").hidden = false; setTimeout(() => $("#pinIn").focus(), 50); }
+  subs.push(() => { if (!$("#staff").hidden) renderStaff(); renderClient(); renderBoards(); });
   await initDB();
-  if (staffMode) enterStaff();
-  else if (!me) $("#regModal").hidden = false;
+  if (view === "staff") enterStaff();
+  else if (view !== "kitchen" && !me) $("#regModal").hidden = false;
   emit();
   setInterval(() => { if (me) $("#greet").textContent = greeting(); }, 60000);
 })();
